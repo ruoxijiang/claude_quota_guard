@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Drop-in wrapper for `claude` meant for scripts, cron jobs, /loop, /schedule, etc. —
+# anywhere a new Claude Code process gets spawned outside of an interactive session,
+# where the UserPromptSubmit hook never gets a chance to run. Checks the same cached
+# quota state (no API call) and skips launching `claude` entirely if quota is exhausted.
+#
+# Usage: claude-guarded [same args as `claude`]
+
+source "$HOME/.claude/quota-guard/lib.sh"
+
+session_id="${CLAUDE_CODE_SESSION_ID:-}"
+cwd="$PWD"
+
+if reason=$(qg_check "$session_id" "$cwd"); then
+  exec claude "$@"
+fi
+
+echo "quota-guard: skipped new claude call" >&2
+echo "$reason" >&2
+echo "(bypass: QUOTA_GUARD_SKIP=1 claude-guarded ..., or '/quota-guard skip project' in an interactive session)" >&2
+exit 1

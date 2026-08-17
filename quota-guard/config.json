@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "block_threshold_percent": 100,
+  "statusline_display": true
+}

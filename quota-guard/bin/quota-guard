@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Standalone quota-guard CLI. Run this directly in a plain terminal — it never goes
+# through Claude Code or the UserPromptSubmit hook, so it always works even if a hook
+# bug ever blocks every prompt in a session again.
+#
+# Usage:
+#   quota-guard status
+#   quota-guard skip-session [session-id]      (defaults to $CLAUDE_CODE_SESSION_ID)
+#   quota-guard skip-project [dir]             (defaults to $PWD)
+#   quota-guard unskip-session [session-id]
+#   quota-guard unskip-project [dir]
+#   quota-guard unskip-all
+#   quota-guard enable | disable
+
+set -euo pipefail
+source "$HOME/.claude/quota-guard/lib.sh"
+
+cmd="${1:-status}"
+[[ $# -gt 0 ]] && shift
+
+case "$cmd" in
+  status)
+    if [[ ! -f "$QG_STATE" ]]; then
+      echo "No quota data cached yet — fills in after the first reply in a session."
+      echo "Calls are allowed by default until then."
+      exit 0
+    fi
+    now=$(date +%s)
+    for window in five_hour seven_day; do
+      used=$(jq -r ".${window}.used_percentage // empty" "$QG_STATE")
+      resets=$(jq -r ".${window}.resets_at // empty" "$QG_STATE")
+      [[ -z "$used" ]] && continue
+      label="5-hour session"
+      [[ "$window" == "seven_day" ]] && label="weekly"
+      if [[ -n "$resets" ]]; then
+        resets_str=$(date -r "$resets" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "unknown")
+        state="ok"
+        (( now < resets )) && awk -v u="$used" 'BEGIN{exit !(u+0>=100)}' 2>/dev/null && state="EXHAUSTED"
+        echo "$label: ${used}% used, resets $resets_str [$state]"
+      else
+        echo "$label: ${used}% used"
+      fi
+    done
+    echo
+    pkey=$(qg_project_key "$PWD")
+    [[ -f "$QG_SKIP_DIR/project-$pkey" ]] && echo "project skip: ACTIVE for $PWD"
+    if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" && -f "$QG_SKIP_DIR/session-$CLAUDE_CODE_SESSION_ID" ]]; then
+      echo "session skip: ACTIVE for $CLAUDE_CODE_SESSION_ID"
+    fi
+    ;;
+  skip-session)
+    id="${1:-${CLAUDE_CODE_SESSION_ID:-}}"
+    [[ -z "$id" ]] && { echo "Pass a session id: quota-guard skip-session <id>" >&2; exit 1; }
+    touch "$QG_SKIP_DIR/session-$id"
+    echo "quota-guard: skipped for session $id"
+    ;;
+  skip-project)
+    dir="${1:-$PWD}"
+    pkey=$(qg_project_key "$dir")
+    touch "$QG_SKIP_DIR/project-$pkey"
+    echo "quota-guard: skipped for project $(cd "$dir" && pwd -P)"
+    ;;
+  unskip-session)
+    id="${1:-${CLAUDE_CODE_SESSION_ID:-}}"
+    [[ -z "$id" ]] && { echo "Pass a session id: quota-guard unskip-session <id>" >&2; exit 1; }
+    rm -f "$QG_SKIP_DIR/session-$id"
+    echo "quota-guard: removed session skip for $id"
+    ;;
+  unskip-project)
+    dir="${1:-$PWD}"
+    pkey=$(qg_project_key "$dir")
+    rm -f "$QG_SKIP_DIR/project-$pkey"
+    echo "quota-guard: removed project skip for $(cd "$dir" && pwd -P)"
+    ;;
+  unskip-all)
+    rm -f "$QG_SKIP_DIR"/session-* "$QG_SKIP_DIR"/project-* 2>/dev/null || true
+    echo "quota-guard: removed all skip markers"
+    ;;
+  enable)
+    jq '.enabled = true' "$QG_CONFIG" > "$QG_CONFIG.tmp" && mv "$QG_CONFIG.tmp" "$QG_CONFIG"
+    echo "quota-guard: enabled"
+    ;;
+  disable)
+    jq '.enabled = false' "$QG_CONFIG" > "$QG_CONFIG.tmp" && mv "$QG_CONFIG.tmp" "$QG_CONFIG"
+    echo "quota-guard: disabled globally (every project/session)"
+    ;;
+  *)
+    echo "Usage: quota-guard status|skip-session [id]|skip-project [dir]|unskip-session [id]|unskip-project [dir]|unskip-all|enable|disable" >&2
+    exit 1
+    ;;
+esac
